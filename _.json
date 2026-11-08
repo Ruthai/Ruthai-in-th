@@ -1,0 +1,16 @@
+{
+  "siteName": "Wandering Frames",
+  "tagline": "Free photos from Thailand, taken by bus, by train and on foot",
+  "author": "Your Name",
+  "siteUrl": "https://www.yourdomain.com",
+  "email": "you@example.com",
+  "coffeeUrl": "https://buymeacoffee.com/yourname",
+  "categories": {
+    "nature":       { "label": "Nature",       "description": "Views, landscapes and flowers" },
+    "architecture": { "label": "Architecture", "description": "Buildings, temples and old houses" },
+    "macro":        { "label": "Macro",        "description": "Close-ups of flowers and insects" },
+    "traveling":    { "label": "Traveling",    "description": "Trips in Thailand and abroad" },
+    "food":         { "label": "Food",         "description": "Meals found along the way" },
+    "others":       { "label": "Others",       "description": "Everything else" }
+  }
+}

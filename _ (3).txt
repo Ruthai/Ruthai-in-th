@@ -1,0 +1,222 @@
+(() => {
+  'use strict';
+  const $ = (s, r = document) => r.querySelector(s);
+  const $ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const shuffle = a => { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const creditText = c => `Photo by ${c.author} — ${c.siteUrl}`;
+  const page = document.body.dataset.page;
+
+  async function copyText(text, btn) {
+    const old = btn.textContent;
+    try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied ✓'; }
+    catch { window.prompt('Copy this credit:', text); }
+    setTimeout(() => { btn.textContent = old; }, 2000);
+  }
+
+  fetch('site.json')
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(init)
+    .catch(e => {
+      console.error(e);
+      const m = $('main');
+      if (m) m.insertAdjacentHTML('afterbegin', '<p class="notice">Sorry, the photo list could not be loaded. Please try again later.</p>');
+    });
+
+  function init(site) {
+    const { config } = site;
+    site.catLabel = Object.fromEntries(site.categories.map(c => [c.id, c.label]));
+    site.photos.forEach(p => { p.search = [p.place, ...p.tags, site.catLabel[p.cat]].join(' ').toLowerCase(); });
+    const t = document.body.dataset.title;
+    document.title = t ? `${t} · ${config.siteName}` : `${config.siteName} · ${config.tagline}`;
+    header(config);
+    footer(config);
+    $('[data-cfg]').forEach(el => { el.textContent = config[el.dataset.cfg] || ''; });
+    $('[data-href]').forEach(el => { el.href = (el.dataset.prefix || '') + (config[el.dataset.href] || ''); });
+    const pages = { home, gallery, map: mapPage, license };
+    if (pages[page]) pages[page](site);
+  }
+
+  /* ---------- Shared layout ---------- */
+  function header(c) {
+    const nav = [['index.html', 'Home', 'home'], ['gallery.html', 'Gallery', 'gallery'], ['map.html', 'Map', 'map'], ['about.html', 'About', 'about'], ['license.html', 'Use & Credit', 'license']];
+    $('#header').outerHTML = `<header class="site-header"><div class="wrap bar">
+      <a class="brand" href="index.html">${esc(c.siteName)}</a>
+      <button class="menu-btn" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      <nav class="nav">${nav.map(([h, l, k]) => `<a href="${h}"${k === page ? ' class="active"' : ''}>${esc(l)}</a>`).join('')}
+        <a class="btn btn-coffee" href="${esc(c.coffeeUrl)}" target="_blank" rel="noopener">☕ Buy me a coffee</a></nav></div></header>`;
+    const btn = $('.menu-btn');
+    btn.onclick = () => btn.setAttribute('aria-expanded', $('.nav').classList.toggle('open'));
+  }
+
+  function footer(c) {
+    $('#footer').outerHTML = `<footer class="site-footer"><div class="wrap foot">
+      <p>© ${new Date().getFullYear()} ${esc(c.author)}. Free to use with credit. Not for commercial use. <a href="license.html">Details</a></p>
+      <p><a href="mailto:${esc(c.email)}">Contact</a> · <a href="${esc(c.coffeeUrl)}" target="_blank" rel="noopener">☕ Buy me a coffee</a></p></div></footer>`;
+  }
+
+  const card = (p, i) => `<figure class="card" data-i="${i}" tabindex="0" role="button" aria-label="Open photo: ${esc(p.place)}">
+    <img src="${p.thumb}" width="${p.w}" height="${p.h}" loading="lazy" alt="${esc(p.place)}"><figcaption>${esc(p.place)}</figcaption></figure>`;
+
+  /* ---------- Home ---------- */
+  function home(site) {
+    const { photos, categories } = site;
+    if (!photos.length) { $('#cat-grid').innerHTML = '<p class="notice">No photos yet. Add some to the photos folder.</p>'; return; }
+    $('#photo-count').textContent = photos.length;
+    $('#cat-grid').innerHTML = categories.map(c => {
+      const pool = photos.filter(p => p.cat === c.id);
+      const cover = pool[Math.floor(Math.random() * pool.length)];
+      return `<a class="cat-card" href="gallery.html?cat=${encodeURIComponent(c.id)}" style="background-image:url('${cover.thumb}')"><span><strong>${esc(c.label)}</strong><small>${esc(c.description)}</small><em>${c.count} photos</em></span></a>`;
+    }).join('');
+    const picks = shuffle(photos).slice(0, 8);
+    const f = $('#featured');
+    f.innerHTML = picks.map(card).join('');
+    const open = e => { const c = e.target.closest('.card'); if (c) openLightbox(site, picks, +c.dataset.i); };
+    f.onclick = open;
+    f.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } };
+  }
+
+  /* ---------- Gallery ---------- */
+  function gallery(site) {
+    const { photos, categories } = site;
+    const params = new URLSearchParams(location.search);
+    const state = { cat: params.get('cat') || 'all', q: params.get('q') || '' };
+    if (state.cat !== 'all' && !categories.some(c => c.id === state.cat)) state.cat = 'all';
+    const grid = $('#grid'), qEl = $('#q'), pills = $('#pills'), tagsEl = $('#tags'), count = $('#count'), empty = $('#empty');
+    let current = [];
+    qEl.value = state.q;
+
+    const inCat = () => photos.filter(p => state.cat === 'all' || p.cat === state.cat);
+    const match = () => {
+      const w = state.q.toLowerCase().split(/\s+/).filter(Boolean);
+      return inCat().filter(p => w.every(x => p.search.includes(x)));
+    };
+
+    function render() {
+      current = match();
+      pills.innerHTML = [{ id: 'all', label: 'All', count: photos.length }, ...categories]
+        .map(c => `<button type="button" class="pill${c.id === state.cat ? ' on' : ''}" data-cat="${esc(c.id)}">${esc(c.label)} <small>${c.count}</small></button>`).join('');
+      const freq = new Map();
+      inCat().forEach(p => p.tags.forEach(t => freq.set(t, (freq.get(t) || 0) + 1)));
+      const top = [...freq].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 14).map(x => x[0]);
+      tagsEl.innerHTML = top.map(t => `<button type="button" class="pill${state.q.toLowerCase() === t ? ' on' : ''}" data-tag="${esc(t)}">#${esc(t)}</button>`).join('');
+      grid.innerHTML = current.map(card).join('');
+      count.textContent = `${current.length} photo${current.length === 1 ? '' : 's'}`;
+      empty.hidden = current.length > 0;
+      const u = new URLSearchParams();
+      if (state.cat !== 'all') u.set('cat', state.cat);
+      if (state.q) u.set('q', state.q);
+      history.replaceState(null, '', u.toString() ? `?${u}` : location.pathname);
+    }
+
+    pills.onclick = e => { const b = e.target.closest('[data-cat]'); if (b) { state.cat = b.dataset.cat; render(); } };
+    tagsEl.onclick = e => {
+      const b = e.target.closest('[data-tag]'); if (!b) return;
+      state.q = state.q.toLowerCase() === b.dataset.tag ? '' : b.dataset.tag;
+      qEl.value = state.q; render();
+    };
+    let timer;
+    qEl.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { state.q = qEl.value; render(); }, 150); };
+    const open = e => { const c = e.target.closest('.card'); if (c) openLightbox(site, current, +c.dataset.i); };
+    grid.onclick = open;
+    grid.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } };
+    render();
+  }
+
+  /* ---------- Map ---------- */
+  function mapPage({ places }) {
+    const note = $('#map-note');
+    if (typeof L === 'undefined') { note.textContent = 'The map could not be loaded. Please check your connection.'; return; }
+    const map = L.map('map').setView([13.75, 100.52], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    const markers = {}, pts = [];
+    places.forEach(pl => {
+      const m = L.marker([pl.lat, pl.lng]).addTo(map);
+      m.bindPopup(`<div class="pop"><img src="${pl.thumb}" alt=""><strong>${esc(pl.name)}</strong><br>${pl.count} photo${pl.count > 1 ? 's' : ''}<br><a href="gallery.html?q=${encodeURIComponent(pl.name)}">View photos →</a></div>`);
+      markers[pl.name.toLowerCase()] = m;
+      pts.push([pl.lat, pl.lng]);
+    });
+    if (!places.length) { note.textContent = 'No places have been pinned yet.'; return; }
+    const want = (new URLSearchParams(location.search).get('place') || '').toLowerCase();
+    if (want && markers[want]) { map.setView(markers[want].getLatLng(), 15); markers[want].openPopup(); }
+    else if (pts.length > 1) map.fitBounds(pts, { padding: [40, 40] });
+    else map.setView(pts[0], 14);
+  }
+
+  /* ---------- License ---------- */
+  function license({ config }) {
+    const t = creditText(config);
+    $('#credit-text').textContent = t;
+    $('#copy-credit').onclick = e => copyText(t, e.currentTarget);
+  }
+
+  /* ---------- Lightbox ---------- */
+  let lb;
+  function openLightbox(site, list, index) {
+    if (!lb) lb = buildLightbox();
+    lb.site = site; lb.list = list; lb.i = index;
+    lb.el.hidden = false;
+    document.body.classList.add('no-scroll');
+    show();
+    $('.lb-close', lb.el).focus();
+  }
+
+  function buildLightbox() {
+    const el = document.createElement('div');
+    el.className = 'lb'; el.hidden = true;
+    el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', 'Photo viewer');
+    el.innerHTML = `<button class="lb-close" type="button" aria-label="Close">×</button>
+      <button class="lb-nav prev" type="button" aria-label="Previous photo">‹</button>
+      <button class="lb-nav next" type="button" aria-label="Next photo">›</button>
+      <div class="lb-body">
+        <img class="lb-img" alt="">
+        <div class="lb-info">
+          <h2 class="lb-place"></h2>
+          <p class="lb-cat"></p>
+          <div class="lb-tags"></div>
+          <div class="lb-actions">
+            <a class="btn lb-dl">⬇ Download</a>
+            <button class="btn btn-ghost lb-copy" type="button">Copy credit</button>
+            <a class="btn btn-ghost lb-map">📍 See on map</a>
+          </div>
+          <p class="lb-credit"></p>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    const s = { el, site: null, list: [], i: 0 };
+    const hide = () => { el.hidden = true; document.body.classList.remove('no-scroll'); $('.lb-img', el).removeAttribute('src'); };
+    const go = d => { s.i = (s.i + d + s.list.length) % s.list.length; show(); };
+    $('.lb-close', el).onclick = hide;
+    $('.prev', el).onclick = () => go(-1);
+    $('.next', el).onclick = () => go(1);
+    el.onclick = e => { if (e.target === el || e.target.classList.contains('lb-body')) hide(); };
+    $('.lb-copy', el).onclick = e => copyText(creditText(s.site.config), e.currentTarget);
+    document.addEventListener('keydown', e => {
+      if (el.hidden) return;
+      if (e.key === 'Escape') hide();
+      if (e.key === 'ArrowLeft') go(-1);
+      if (e.key === 'ArrowRight') go(1);
+    });
+    let x0 = null;
+    el.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+    el.addEventListener('touchend', e => {
+      if (x0 === null) return;
+      const dx = e.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 60) go(dx < 0 ? 1 : -1);
+    });
+    return s;
+  }
+
+  function show() {
+    const p = lb.list[lb.i], el = lb.el;
+    const img = $('.lb-img', el); img.src = p.full; img.alt = p.place;
+    $('.lb-place', el).textContent = p.place;
+    $('.lb-cat', el).textContent = lb.site.catLabel[p.cat] || p.cat;
+    $('.lb-tags', el).innerHTML = p.tags.map(t => `<a class="tag-link" href="gallery.html?q=${encodeURIComponent(t)}">#${esc(t)}</a>`).join('');
+    const dl = $('.lb-dl', el); dl.href = p.full; dl.setAttribute('download', p.dl);
+    const m = $('.lb-map', el); m.hidden = p.lat == null; m.href = `map.html?place=${encodeURIComponent(p.place)}`;
+    $('.lb-credit', el).textContent = `${creditText(lb.site.config)} · Free for non-commercial use`;
+    const multi = lb.list.length > 1;
+    $('.prev', el).hidden = !multi; $('.next', el).hidden = !multi;
+  }
+})();

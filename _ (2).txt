@@ -1,0 +1,93 @@
+// Reads photos/, makes thumbnails + medium-size downloads, writes dist/ for deployment.
+const fs = require('fs');
+const path = require('path');
+const sharp = require('sharp');
+
+const ROOT = __dirname;
+const SRC = path.join(ROOT, 'photos');
+const DIST = path.join(ROOT, 'dist');
+const IMG = /\.(jpe?g|png|webp)$/i;
+
+const enc = s => encodeURIComponent(s).replace(/['()]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+const clean = s => s.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+const norm = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+const titleCase = s => clean(s).replace(/\b\w/g, c => c.toUpperCase());
+
+// "Wat-Arun__temple_river__02.jpg" -> place "Wat Arun", tags [temple, river]
+function parseName(file) {
+  const parts = file.replace(IMG, '').split('__').map(s => s.trim()).filter(Boolean);
+  const place = clean((parts[0] || file).replace(/\s*\(\d+\)$/, ''));
+  const tagPart = parts.slice(1).find(p => !/^\d+$/.test(p)) || '';
+  const tags = [...new Set(tagPart.split('_').map(t => t.replace(/-/g, ' ').trim().toLowerCase()).filter(Boolean))];
+  return { place, tags };
+}
+
+async function main() {
+  const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'data', 'config.json'), 'utf8'));
+  const placesFile = path.join(ROOT, 'data', 'places.json');
+  const placesRaw = fs.existsSync(placesFile) ? JSON.parse(fs.readFileSync(placesFile, 'utf8')) : {};
+  const coords = {};
+  for (const [name, ll] of Object.entries(placesRaw)) coords[norm(name)] = ll;
+
+  fs.rmSync(DIST, { recursive: true, force: true });
+  fs.cpSync(path.join(ROOT, 'web'), DIST, { recursive: true });
+
+  const folders = fs.existsSync(SRC)
+    ? fs.readdirSync(SRC, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)
+    : [];
+  const order = Object.keys(config.categories || {});
+  folders.sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || a.localeCompare(b);
+  });
+
+  const categories = [], photos = [], placeMap = new Map(), missing = new Set();
+
+  for (const cat of folders) {
+    const files = fs.readdirSync(path.join(SRC, cat)).filter(f => IMG.test(f))
+      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+    if (!files.length) continue;
+
+    fs.mkdirSync(path.join(DIST, 'photos', cat), { recursive: true });
+    fs.mkdirSync(path.join(DIST, 'thumbs', cat), { recursive: true });
+    const meta = (config.categories || {})[cat] || {};
+    categories.push({ id: cat, label: meta.label || titleCase(cat), description: meta.description || '', count: files.length });
+
+    for (const file of files) {
+      const stem = path.parse(file).name;
+      const out = stem + '.jpg';
+      const img = sharp(path.join(SRC, cat, file)).rotate(); // auto-orient; metadata (GPS) is not copied
+      const [, thumb] = await Promise.all([
+        img.clone().resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85, mozjpeg: true }).toFile(path.join(DIST, 'photos', cat, out)),
+        img.clone().resize({ width: 720, withoutEnlargement: true })
+          .jpeg({ quality: 74, mozjpeg: true }).toFile(path.join(DIST, 'thumbs', cat, out))
+      ]);
+
+      const { place, tags } = parseName(file);
+      const ll = coords[norm(place)];
+      if (!ll) missing.add(place);
+      const p = {
+        cat, place, tags, dl: out, w: thumb.width, h: thumb.height,
+        thumb: `thumbs/${enc(cat)}/${enc(out)}`,
+        full: `photos/${enc(cat)}/${enc(out)}`,
+        lat: ll ? ll[0] : null, lng: ll ? ll[1] : null
+      };
+      photos.push(p);
+      if (ll) {
+        const k = norm(place);
+        const e = placeMap.get(k) || { name: place, lat: ll[0], lng: ll[1], count: 0, thumb: p.thumb };
+        e.count++;
+        placeMap.set(k, e);
+      }
+    }
+  }
+
+  const places = [...placeMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+  fs.writeFileSync(path.join(DIST, 'site.json'), JSON.stringify({ config, categories, photos, places }));
+
+  console.log(`Built ${photos.length} photos in ${categories.length} categories.`);
+  if (missing.size) console.log('\nPlaces with no map coordinates (add them to data/places.json):\n - ' + [...missing].join('\n - '));
+}
+
+main().catch(e => { console.error(e); process.exit(1); });
